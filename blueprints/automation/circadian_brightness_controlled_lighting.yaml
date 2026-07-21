@@ -1,0 +1,322 @@
+# Circadian & Brightness-Controlled Room Lighting
+# ================================================
+#
+# WHAT THIS BLUEPRINT DOES
+# ------------------------
+# This automation continuously adapts artificial lighting to two factors:
+#
+#   1. Sun position (circadian rhythm) – The color temperature of the light
+#      shifts automatically throughout the day:
+#        • Night / civil twilight  (elevation ≤ -6°) → warm white  ~2200 K
+#        • Twilight               (-6° < elevation ≤ 0°) → cool white ~6500 K
+#        • Daytime                (elevation > 0°) → scales from 2700 K up to
+#          5500 K as the sun rises higher
+#
+#   2. Room illuminance (lux control) – The automation tries to keep the
+#      combined brightness (natural + artificial light) within a comfortable
+#      target range:
+#        • The target lux level rises with the sun (min_target_lux at night,
+#          up to min_target_lux + 250 lx at full sun, capped at 500 lx).
+#        • A ±30 lx tolerance band prevents constant micro-adjustments.
+#        • When the room is too dark the lamp brightness is raised by 15 %
+#          per automation cycle; when too bright it is lowered by 15 %.
+#        • If the room is still over-bright even at the minimum lamp level
+#          (≤ 10 %), the light is switched off entirely.
+#
+# TRIGGERS
+# --------
+#   • Presence ON  – light turns on immediately if the room is dark enough.
+#   • Presence OFF (after configurable delay) – light turns off.
+#   • Sun elevation change – color temperature is updated while the light
+#     is on and presence is detected.
+#   • Lux sensor change – brightness is adjusted to stay within the target
+#     range while the light is on and presence is detected.
+#
+# OVERRIDE / MANUAL LOCK
+# ----------------------
+#   An optional input_boolean (e.g. "Gaming Mode") can be selected. While
+#   that switch is ON the automation does nothing, allowing full manual
+#   control of the light.
+#
+# INPUTS
+# ------
+#   presence_sensor  – binary_sensor that reports room occupancy / motion
+#   lux_sensor       – illuminance sensor (device_class: illuminance)
+#   target_light     – a single light entity or a light group
+#   min_target_lux   – minimum desired lux at night/evening (default 150 lx)
+#   override_switch  – optional input_boolean that disables the automation
+#   off_delay        – minutes to wait before turning off after presence gone
+#                      (default 2 min)
+
+blueprint:
+  name: "Zirkadiane & Helligkeitsgesteuerte Raumbeleuchtung"
+  description: >
+    Passt Kunstlicht stufenlos an den Sonnenstand (Kelvin) und die
+    Gemischthelligkeit (Lux) im Raum an. Inklusive Override-Schalter.
+
+    Adapts artificial light continuously to the sun position (color temperature
+    in Kelvin) and the combined room brightness (lux). Includes an optional
+    manual override switch.
+  domain: automation
+  input:
+    presence_sensor:
+      name: Präsenz- / Bewegungssensor
+      selector:
+        entity:
+          domain: binary_sensor
+    lux_sensor:
+      name: Lichtsensor (Lux)
+      description: >
+        Sensor mit Beleuchtungsstärke in Lux (device_class: illuminance).
+        Falls dein Sensor diese Klasse nicht gesetzt hat, wähle ihn trotzdem
+        aus – er muss lediglich Luxwerte liefern.
+        Illuminance sensor reporting values in lux. If your sensor does not
+        have the illuminance device class set, you can still select it manually
+        as long as it reports lux values.
+      selector:
+        entity:
+          domain: sensor
+          device_class: illuminance
+    target_light:
+      name: Ziel-Licht / Lichtgruppe
+      description: Einzelne Lampe oder erstellte Lichtgruppe.
+      selector:
+        entity:
+          domain: light
+    min_target_lux:
+      name: Minimale Ziel-Helligkeit (Nacht/Abend)
+      description: >
+        Die Ziel-Luxanzahl bei Dunkelheit. Höhere Werte (z. B. 150–200 Lux)
+        machen den Raum abends deutlich heller.
+      default: 150
+      selector:
+        number:
+          min: 20
+          max: 500
+          unit_of_measurement: "lx"
+    override_switch:
+      name: Manuelle Sperre / Gaming Mode (Optional)
+      description: >
+        Ist dieser Schalter AN (on), pausiert die Automatik und überschreibt
+        das Licht nicht.
+      default: none
+      selector:
+        entity:
+          domain: input_boolean
+    off_delay:
+      name: Ausschalt-Verzögerung (Minuten)
+      default: 2
+      selector:
+        number:
+          min: 0
+          max: 60
+          unit_of_measurement: "min"
+    initial_brightness_pct:
+      name: Einschalt-Helligkeit (%)
+      description: >
+        Lampenhelligkeit beim ersten Einschalten (wenn der Raum zu dunkel ist).
+        Die Automatik passt die Helligkeit danach schrittweise an.
+        Initial brightness when the light is turned on. The automation
+        adjusts it gradually afterwards.
+      default: 40
+      selector:
+        number:
+          min: 5
+          max: 100
+          unit_of_measurement: "%"
+
+trigger:
+  # Trigger 1: presence detected
+  - trigger: state
+    entity_id: !input presence_sensor
+    to: "on"
+    id: motion_detected
+
+  # Trigger 2: presence gone (after delay) → turn off light
+  - trigger: state
+    entity_id: !input presence_sensor
+    to: "off"
+    for:
+      minutes: !input off_delay
+    id: motion_cleared
+
+  # Trigger 3: sun moves → update color temperature
+  - trigger: state
+    entity_id: sun.sun
+    attribute: elevation
+    id: sun_moved
+
+  # Trigger 4: lux changes → adjust brightness
+  - trigger: state
+    entity_id: !input lux_sensor
+    id: lux_changed
+
+condition: []
+
+action:
+  - variables:
+      presence_entity: !input presence_sensor
+      lux_entity: !input lux_sensor
+      light_entity: !input target_light
+      min_lux: !input min_target_lux
+      override_entity: !input override_switch
+
+      # True when the manual override switch is ON (automation is locked out)
+      is_overridden: >-
+        {% if override_entity == 'none' or override_entity == [] or override_entity == '' %}
+          false
+        {% else %}
+          {{ is_state(override_entity, 'on') }}
+        {% endif %}
+
+      current_lux: "{{ states(lux_entity) | float(0) }}"
+      sun_elevation: "{{ state_attr('sun.sun', 'elevation') | float(0) }}"
+
+      # Current lamp brightness as a percentage (0 when the light is off).
+      # HA stores brightness as an integer 0–255; dividing by 2.55 converts
+      # it to the 0–100 % range.
+      current_brightness_pct: >-
+        {% if is_state(light_entity, 'on') %}
+          {{ ((state_attr(light_entity, 'brightness') | float(0)) / 2.55) | round(0) }}
+        {% else %}
+          0
+        {% endif %}
+
+      # Dynamic lux target: min_lux at night, up to min_lux + 250 lx during
+      # the day (scales with sun elevation), capped at 500 lx.
+      #   60  – assumed maximum "useful" sun elevation (degrees) for scaling
+      #   250 – additional lux range added when the sun is at its highest
+      target_lux: >-
+        {% if sun_elevation <= 0 %}
+          {{ min_lux }}
+        {% else %}
+          {{ min( (min_lux + (sun_elevation / 60) * 250) | round(0), 500 ) }}
+        {% endif %}
+
+      # Tolerance band: ±30 lx – prevents constant micro-adjustments
+      lux_tolerance: 30
+
+      # Step size for brightness adjustments (raised or lowered per cycle)
+      brightness_step: 15
+
+      # Lamp brightness when first switched on; the automation fine-tunes it
+      # afterwards based on actual lux readings
+      initial_brightness_pct: !input initial_brightness_pct
+
+      # Color temperature in Kelvin based on sun elevation:
+      #   ≤ -6°          → 2200 K (very warm / night mode)
+      #   -6° … 0°       → 6500 K (cool / twilight)
+      #   > 0°           → 2700 K … 5500 K (scales with elevation)
+      #     2700  – base color temperature at sunrise / sunset
+      #     5500  – maximum color temperature (daylight white) cap
+      #     50    – reference elevation (degrees) for full daytime scaling
+      #     2800  – color temperature range added from base to cap (5500 - 2700)
+      calculated_kelvin: >-
+        {% if sun_elevation <= -6 %}
+          2200
+        {% elif sun_elevation <= 0 %}
+          6500
+        {% else %}
+          {{ min( (2700 + (sun_elevation / 50) * 2800) | round(0), 5500 ) }}
+        {% endif %}
+
+  - choose:
+      # CASE 0: Manual override is active → do nothing
+      - conditions:
+          - condition: template
+            value_template: "{{ is_overridden }}"
+        sequence: []
+
+      # CASE 1: Room left (presence gone) → turn light OFF
+      - conditions:
+          - condition: trigger
+            id: motion_cleared
+        sequence:
+          - action: light.turn_off
+            target:
+              entity_id: "{{ light_entity }}"
+
+      # CASE 2: Presence detected, light is OFF, room too dark → turn light ON
+      - conditions:
+          - condition: template
+            value_template: "{{ is_state(presence_entity, 'on') }}"
+          - condition: template
+            value_template: "{{ is_state(light_entity, 'off') }}"
+          - condition: template
+            value_template: "{{ current_lux < (target_lux - lux_tolerance) }}"
+        sequence:
+          - action: light.turn_on
+            target:
+              entity_id: "{{ light_entity }}"
+            data:
+              color_temp_kelvin: "{{ calculated_kelvin }}"
+              brightness_pct: "{{ initial_brightness_pct }}"
+              transition: 2
+
+      # CASE 3: Presence detected, light is ON, room way too bright even at
+      #         minimum dimming (≤ 10 %) → turn light OFF
+      #         Uses lux_tolerance * 2 as the "hard" over-bright margin to
+      #         avoid switching off too aggressively on small fluctuations.
+      - conditions:
+          - condition: template
+            value_template: "{{ is_state(presence_entity, 'on') }}"
+          - condition: template
+            value_template: "{{ is_state(light_entity, 'on') }}"
+          - condition: template
+            value_template: "{{ current_lux > (target_lux + lux_tolerance * 2) and current_brightness_pct <= 10 }}"
+        sequence:
+          - action: light.turn_off
+            target:
+              entity_id: "{{ light_entity }}"
+
+      # CASE 4: Presence detected, light is ON → fine-tune brightness / color
+      - conditions:
+          - condition: template
+            value_template: "{{ is_state(presence_entity, 'on') }}"
+          - condition: template
+            value_template: "{{ is_state(light_entity, 'on') }}"
+        sequence:
+          - choose:
+              # Too dark → increase brightness by 15 %
+              - conditions:
+                  - condition: template
+                    value_template: "{{ current_lux < (target_lux - lux_tolerance) }}"
+                  - condition: template
+                    value_template: "{{ current_brightness_pct < 100 }}"
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: "{{ light_entity }}"
+                    data:
+                      color_temp_kelvin: "{{ calculated_kelvin }}"
+                      brightness_pct: "{{ min(current_brightness_pct + brightness_step, 100) }}"
+                      transition: 3
+
+              # Too bright → decrease brightness by 15 %
+              - conditions:
+                  - condition: template
+                    value_template: "{{ current_lux > (target_lux + lux_tolerance) }}"
+                  - condition: template
+                    value_template: "{{ current_brightness_pct > 5 }}"
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: "{{ light_entity }}"
+                    data:
+                      color_temp_kelvin: "{{ calculated_kelvin }}"
+                      brightness_pct: "{{ max(current_brightness_pct - brightness_step, 5) }}"
+                      transition: 3
+
+              # Brightness already within tolerance → only update color temperature
+              - conditions:
+                  - condition: trigger
+                    id: sun_moved
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: "{{ light_entity }}"
+                    data:
+                      color_temp_kelvin: "{{ calculated_kelvin }}"
+                      transition: 10
+
+mode: single
