@@ -7,8 +7,8 @@
 #
 #   1. Sun position (circadian rhythm) – The color temperature of the light
 #      shifts automatically throughout the day:
-#        • Night / civil twilight  (elevation ≤ –6°) → warm white  ~2200 K
-#        • Twilight               (–6° < elevation ≤ 0°) → cool white ~6500 K
+#        • Night / civil twilight  (elevation ≤ -6°) → warm white  ~2200 K
+#        • Twilight               (-6° < elevation ≤ 0°) → cool white ~6500 K
 #        • Daytime                (elevation > 0°) → scales from 2700 K up to
 #          5500 K as the sun rises higher
 #
@@ -66,6 +66,13 @@ blueprint:
           domain: binary_sensor
     lux_sensor:
       name: Lichtsensor (Lux)
+      description: >
+        Sensor mit Beleuchtungsstärke in Lux (device_class: illuminance).
+        Falls dein Sensor diese Klasse nicht gesetzt hat, wähle ihn trotzdem
+        aus – er muss lediglich Luxwerte liefern.
+        Illuminance sensor reporting values in lux. If your sensor does not
+        have the illuminance device class set, you can still select it manually
+        as long as it reports lux values.
       selector:
         entity:
           domain: sensor
@@ -165,7 +172,9 @@ action:
       current_lux: "{{ states(lux_entity) | float(0) }}"
       sun_elevation: "{{ state_attr('sun.sun', 'elevation') | float(0) }}"
 
-      # Current lamp brightness as a percentage (0 when the light is off)
+      # Current lamp brightness as a percentage (0 when the light is off).
+      # HA stores brightness as an integer 0–255; dividing by 2.55 converts
+      # it to the 0–100 % range.
       current_brightness_pct: >-
         {% if is_state(light_entity, 'on') %}
           {{ ((state_attr(light_entity, 'brightness') | float(0)) / 2.55) | round(0) }}
@@ -174,7 +183,9 @@ action:
         {% endif %}
 
       # Dynamic lux target: min_lux at night, up to min_lux + 250 lx during
-      # the day (scales with sun elevation), capped at 500 lx
+      # the day (scales with sun elevation), capped at 500 lx.
+      #   60  – assumed maximum "useful" sun elevation (degrees) for scaling
+      #   250 – additional lux range added when the sun is at its highest
       target_lux: >-
         {% if sun_elevation <= 0 %}
           {{ min_lux }}
@@ -193,9 +204,13 @@ action:
       initial_brightness_pct: !input initial_brightness_pct
 
       # Color temperature in Kelvin based on sun elevation:
-      #   ≤ –6°          → 2200 K (very warm / night mode)
-      #   –6° … 0°       → 6500 K (cool / twilight)
+      #   ≤ -6°          → 2200 K (very warm / night mode)
+      #   -6° … 0°       → 6500 K (cool / twilight)
       #   > 0°           → 2700 K … 5500 K (scales with elevation)
+      #     2700  – base color temperature at sunrise / sunset
+      #     5500  – maximum color temperature (daylight white) cap
+      #     50    – reference elevation (degrees) for full daytime scaling
+      #     2800  – color temperature range added from base to cap (5500 - 2700)
       calculated_kelvin: >-
         {% if sun_elevation <= -6 %}
           2200

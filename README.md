@@ -24,8 +24,8 @@ This automation keeps the artificial lighting in a room comfortable without any 
 
 | Sun elevation | Color temperature |
 |---------------|-------------------|
-| ≤ –6° (deep night) | ~2 200 K – very warm white |
-| –6° … 0° (twilight) | ~6 500 K – cool white |
+| ≤ -6° (deep night) | ~2 200 K – very warm white |
+| -6° ... 0° (twilight) | ~6 500 K – cool white |
 | > 0° (daytime) | 2 700 K → 5 500 K – scales with elevation |
 
 #### Dynamic lux target
@@ -67,14 +67,14 @@ trigger fires
   ├─ presence gone?       → turn light OFF
   │
   ├─ presence ON, light OFF, room too dark?
-  │       → turn light ON at 40 % / calculated Kelvin
+  │       → turn light ON at initial_brightness_pct (default 40 %) / calculated Kelvin
   │
   ├─ presence ON, light ON, room over-bright at ≤ 10 % brightness?
   │       → turn light OFF
   │
   └─ presence ON, light ON
           ├─ room too dark  → brightness +15 % (max 100 %)
-          ├─ room too bright → brightness –15 % (min 5 %)
+          ├─ room too bright → brightness -15 % (min 5 %)
           └─ within tolerance, sun moved → update color temperature only
 ```
 
